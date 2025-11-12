@@ -1,0 +1,13 @@
+__MACOSX/ 
+.DS_Store
+
+__pycache__/
+ckpts/
+
+ckpt_iter_*.pth.tar
+
+outputs/
+
+__pycache__/
+*.py[cod]
+*$py.class
