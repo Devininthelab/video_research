@@ -835,4 +835,4 @@ with gr.Blocks() as demo:
 
     run_button.click(DragNUWA_net.run, [first_frame_path, tracking_points, inference_batch_size, motion_brush_mask, motion_brush_viz, ctrl_scale], [hint_image, output_video, output_flow, output_video_mp4, output_flow_mp4])
 
-    demo.launch(server_name="127.0.0.1", debug=True, server_port=9080)
+    demo.launch(server_name="127.0.0.1", share=True, debug=True, server_port=9080)

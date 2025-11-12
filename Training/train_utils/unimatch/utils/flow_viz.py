@@ -244,6 +244,10 @@ def flow_to_image(flow):
     :param flow: optical flow map
     :return: optical flow image in middlebury color
     """
+    # Convert to float32 if needed (CPU doesn't support sqrt on float16)
+    if flow.dtype == torch.float16:
+        flow = flow.float()
+    
     u = flow[:, :, 0]
     v = flow[:, :, 1]
 

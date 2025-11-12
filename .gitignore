@@ -10,3 +10,6 @@ outputs/
 
 *.py[cod]
 *$py.class
+
+hfcp
+Training/train_utils/unimatch/pretrained/gmflow-scale2-regrefine6-mixdata-train320x576-4e7b215d.pth

@@ -1237,4 +1237,4 @@ with gr.Blocks() as demo:
     run_button.click(DragNUWA_net.run, [first_frame_path, audio_path, tracking_points, motion_brush_mask, motion_brush_viz, ldmk_mask_mask, ldmk_mask_viz, ctrl_scale_traj, ctrl_scale_ldmk, ldmk_render], [hint_image, traj_flows_gif, ldmk_flows_gif, viz_ldmk_gif, outputs_gif, traj_flows_mp4, ldmk_flows_mp4, viz_ldmk_mp4, outputs_mp4])
 
     # demo.launch(server_name="0.0.0.0", debug=True, server_port=80)
-    demo.launch(server_name="127.0.0.1", debug=True, server_port=9080)
+    demo.launch(server_name="127.0.0.1", share=True, debug=True, server_port=9080)

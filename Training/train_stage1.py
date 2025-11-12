@@ -69,6 +69,10 @@ logger = get_logger(__name__, log_level="INFO")
 def preprocess_size(image1, image2, padding_factor=32):
     '''
         img: [b, c, h, w]
+        preprares images for optical flow estimation
+        ensures width > height (model requirement)
+        resizes to [384, 512] for flow prediction 
+        scale flow vectors back to original dimensions
     '''
     transpose_img = False
     # the model is trained with size: width > height
@@ -113,6 +117,10 @@ def postprocess_size(flow_pr, inference_size, ori_size, transpose_img):
 def get_optical_flows(unimatch, video_frame):
     '''
         video_frame: [b, t, c, h, w]
+        extract optical flow from consecutive video frames using Unimatch
+        return flow from frame 0 to all subsequent frames
+
+        return: flows: [b, t-1, 2, h, w]
     '''
 
     video_frame = video_frame * 255
@@ -729,7 +737,7 @@ def main():
         ffn_dim_expansion=4,
         num_transformer_layers=6,
         reg_refine=True,
-        task='flow').to('cuda')
+        task='flow').to('cuda') # pretrained, fronzed for optimcal flow estmiator
     checkpoint = torch.load('./train_utils/unimatch/pretrained/gmflow-scale2-regrefine6-mixdata-train320x576-4e7b215d.pth')
     unimatch.load_state_dict(checkpoint['model'])
     unimatch.eval()
@@ -869,6 +877,15 @@ def main():
         batch_size=args.per_gpu_batch_size,
         num_workers=args.num_workers,
     )
+    # Data Flow:
+    # Load video frames from WebVid10M dataset
+    # Encode first frame with CLIP → conditioning
+    # Encode all frames to VAE latents
+    # Extract optical flows between frames (frame 0 → all others)
+    # Add noise to latents (diffusion forward process)
+    # ControlNet processes flows and injects features into UNet
+    # UNet denoises with ControlNet guidance
+    # Compute loss against clean latents
 
     test_dataset = WebVid10M(
         meta_path='/apdcephfs/share_1290939/0_public_datasets/WebVid/metadata/metadata_2048_val.csv',
@@ -962,6 +979,10 @@ def main():
         batch_size,
         unet=None,
     ):
+        """
+        Creates temporal conditioning embeddings
+        Includes FPS, motion bucket ID, and noise augmentation strength
+        """
         # # Ensure motion_bucket_ids is a tensor with the correct shape
         # if not isinstance(motion_bucket_ids, torch.Tensor):
         #     # motion_bucket_ids = torch.tensor(motion_bucket_ids, dtype=dtype)

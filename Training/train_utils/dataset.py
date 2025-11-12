@@ -36,9 +36,9 @@ class WebVid10M(Dataset):
             self,
             meta_path='/apdcephfs/share_1290939/0_public_datasets/WebVid/metadata/results_2M_train.csv',
             data_dir='/apdcephfs/share_1290939/0_public_datasets/WebVid',
-            sample_size=[256, 256], 
-            sample_stride=1, 
-            sample_n_frames=14,
+            sample_size=[256, 256], # target frame resloution
+            sample_stride=1, # frame sampling interval (=1 means consecutive frames)
+            sample_n_frames=14, # number of frames to extract per video clip
         ):
         zero_rank_print(f"loading annotations from {meta_path} ...")
 
@@ -69,12 +69,18 @@ class WebVid10M(Dataset):
     
     def _get_video_path(self, sample):
         rel_video_fp = os.path.join(sample['page_dir'], str(sample['videoid']) + '.mp4')
-        full_video_fp = os.path.join(self.data_dir, 'videos', rel_video_fp)
+        # Check if data_dir already contains 'videos' subdirectory structure
+        # For original WebVid: data_dir = /path/to/WebVid, videos in /path/to/WebVid/videos/
+        # For reduced WebVid: data_dir = /path/to/reduced_WebVid, videos in /path/to/reduced_WebVid/
+        if os.path.exists(os.path.join(self.data_dir, 'videos')):
+            full_video_fp = os.path.join(self.data_dir, 'videos', rel_video_fp)
+        else:
+            full_video_fp = os.path.join(self.data_dir, rel_video_fp)
         return full_video_fp, rel_video_fp
     
     def get_batch(self, index):
 
-        while True:
+        while True: # this is just for skip failed video
 
             index = index % len(self.metadata)
             sample = self.metadata.iloc[index]
@@ -109,10 +115,11 @@ class WebVid10M(Dataset):
                 index += 1
                 continue
 
+        # validation if video has enough frames (required_frame_num = stride × n_frames)
         assert(frames.shape[0] == self.sample_n_frames),f'{len(frames)}, self.video_length={self.sample_n_frames}'
 
         frames = frames.asnumpy()
-
+        # resize to 256 x 256
         resized_frames = []
         for i in range(frames.shape[0]):
             frame = np.array(Image.fromarray(frames[i]).convert('RGB').resize([self.sample_size[1], self.sample_size[0]]))
@@ -120,7 +127,7 @@ class WebVid10M(Dataset):
         resized_frames = np.array(resized_frames)
 
         resized_frames = torch.tensor(resized_frames).permute(0, 3, 1, 2).float()  # [t,h,w,c] -> [t,c,h,w]
-    
+
         return resized_frames, rel_path
         
     
@@ -132,7 +139,7 @@ class WebVid10M(Dataset):
         pixel_values, video_name = self.get_batch(idx)
 
         # pixel_values = self.pixel_transforms(pixel_values)
-        pixel_values = pixel_values / 255.
+        pixel_values = pixel_values / 255. # to [0,1]
         
         sample = dict(pixel_values=pixel_values, video_name=video_name)
         return sample
