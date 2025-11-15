@@ -222,7 +222,12 @@ def cuda_launch(strKey:str):
         os.environ['CUDA_HOME'] = cupy.cuda.get_cuda_path()
     # end
 
-    return cupy.cuda.compile_with_cache(objCudacache[strKey]['strKernel'], tuple(['-I ' + os.environ['CUDA_HOME'], '-I ' + os.environ['CUDA_HOME'] + '/include'])).get_function(objCudacache[strKey]['strFunction'])
+    # Use RawModule for CuPy 13.x compatibility
+    try:
+        return cupy.RawModule(code=objCudacache[strKey]['strKernel'], options=tuple(['-I ' + os.environ['CUDA_HOME'], '-I ' + os.environ['CUDA_HOME'] + '/include'])).get_function(objCudacache[strKey]['strFunction'])
+    except:
+        # Fallback for older CuPy versions
+        return cupy.cuda.compile_with_cache(objCudacache[strKey]['strKernel'], tuple(['-I ' + os.environ['CUDA_HOME'], '-I ' + os.environ['CUDA_HOME'] + '/include'])).get_function(objCudacache[strKey]['strFunction'])
 # end
 
 

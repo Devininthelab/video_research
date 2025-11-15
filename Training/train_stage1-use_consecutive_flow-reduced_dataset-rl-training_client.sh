@@ -2,7 +2,7 @@ EXP_NAME="train_stage1"
 
 accelerate launch --main_process_port=27657 train_stage1-use_consecutive_flow-reduced_dataset-rl-training_client.py \
  --pretrained_model_name_or_path="./ckpts/stable-video-diffusion-img2vid-xt-1-1" \
- --controlnet_model_name_or_path="/mnt/ssd6/thong/MOFA-Video/Training/logs-use_consecutive_flow-reduced_dataset/train_stage1/checkpoint-7500/controlnet" \
+ --controlnet_model_name_or_path="/projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet" \
  --output_dir="logs-use_consecutive_flow-reduced_dataset-rl/${EXP_NAME}/" \
  --width=384 \
  --height=384 \

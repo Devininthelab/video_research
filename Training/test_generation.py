@@ -153,13 +153,13 @@ def parse_args():
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/home/thangluu7803/video/data_anh_thong/reduced_clean_results_2M_train.csv",
+        default="/projects_vol/gp_slab/minhthan001/data_webvid_reduce/reduced_clean_results_2M_train.csv",
         help="Path to dataset CSV file",
     )
     parser.add_argument(
         "--data_dir",
         type=str,
-        default="/home/thangluu7803/video/data_anh_thong/reduced_WebVid",
+        default="/projects_vol/gp_slab/minhthan001/data_webvid_reduce/reduced_WebVid",
         help="Root directory containing the video files",
     )
     
@@ -373,7 +373,7 @@ def main():
 if __name__ == "__main__":
     main()
     # with checkpoint consecutive a thong
-    # python test_generation.py --controlnet_path /home/thangluu7803/video/MOFA-Video/all_checkpoints_a_thong/consecutive_flow/checkpoint-7500/controlnet --num_samples 5 --output_dir ./output_consecutive_a_thong
+    # python test_generation.py --controlnet_path /projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet --num_samples 1 --output_dir ./output_consecutive_a_thong
 
     # with checkpoint non consecutive a thong
     # python test_generation.py --controlnet_path /home/thangluu7803/video/MOFA-Video/all_checkpoints_a_thong/optical_flow/checkpoint-7500/controlnet --num_samples 5 --output_dir ./output_non_consecutive_a_thong

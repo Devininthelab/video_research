@@ -2,6 +2,7 @@ import argparse
 import logging
 import math
 import os
+import time
 import shutil
 from pathlib import Path
 from collections import defaultdict
@@ -203,7 +204,8 @@ def parse_args():
     parser.add_argument("--num_inner_epochs", type=int, default=4, help="PPO inner epochs")
     parser.add_argument("--sample_num_batches_per_epoch", type=int, default=4)
     parser.add_argument("--train_gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--weight_update_freq", type=int, default=50)
+    parser.add_argument("--weight_update_freq", type=int, default=20, help="Update server weights every N epochs")
+    parser.add_argument("--reference_update_freq", type=int, default=10, help="Update reference policy every N epochs")
     
     # PPO hyperparameters
     parser.add_argument("--learning_rate", type=float, default=5e-7)
@@ -212,7 +214,9 @@ def parse_args():
     parser.add_argument("--gamma", type=float, default=1.0, help="Discount factor")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE lambda")
     parser.add_argument("--adv_clip_max", type=float, default=5.0, help="Advantage clipping")
-    parser.add_argument("--kl_penalty", type=float, default=0.5, help="KL penalty coefficient")
+    parser.add_argument("--kl_penalty", type=float, default=0.1, help="KL penalty coefficient")
+    parser.add_argument("--target_kl", type=float, default=0.01, help="Target KL divergence")
+    parser.add_argument("--kl_warmup_steps", type=int, default=100, help="Steps to warmup KL penalty")
     
     # Reward function arguments
     parser.add_argument("--use_temporal_consistency_reward", action="store_true")
@@ -388,15 +392,21 @@ def ppo_step_with_reference_policy(
     total_policy_loss = 0.0
     total_kl_loss = 0.0
     total_clip_fraction = 0.0
+    total_approx_kl = 0.0
 
     rewards_list = [float(s['reward']) for s in samples]
     rewards_tensor = torch.tensor(rewards_list, dtype=torch.float32, device=device)
     
-    # compute advantages
+    # compute advantages with better normalization
     adv = rewards_tensor - rewards_tensor.mean()
     adv_std = adv.std(unbiased=False)
-    if adv_std.item() > 1e-8:
-        adv = adv / (adv_std + 1e-8)
+    # Use a larger epsilon to prevent over-normalization
+    if adv_std.item() > 1e-6:
+        adv = adv / (adv_std + 1e-5)
+    else:
+        # If all rewards are identical, set advantages to zero
+        logger.warning(f"All rewards are nearly identical (std={adv_std.item():.2e}), setting advantages to zero")
+        adv = torch.zeros_like(adv)
     adv = torch.clamp(adv, -args.adv_clip_max, args.adv_clip_max)
 
     # reference policy forward pass
@@ -451,7 +461,7 @@ def ppo_step_with_reference_policy(
             conditional_latents = conditional_latents.unsqueeze(1).repeat(1, noisy_latents.shape[1], 1, 1, 1)
             inp_noisy_latents_cat = torch.cat([inp_noisy_latents, conditional_latents], dim=2)
             
-            down_block_res_samples, mid_block_res_sample, _, _ = controlnet(
+            down_block_res_samples, mid_block_res_sample, _, _ = reference_controlnet(
                 inp_noisy_latents_cat,
                 timesteps,
                 encoder_hidden_states,
@@ -483,7 +493,6 @@ def ppo_step_with_reference_policy(
             
     
     controlnet.train()
-    optimizer.zero_grad()
     # current policy forward pass + loss
     for idx, sample in enumerate(samples):
         pixel_values = sample['pixel_values'].to(device)
@@ -562,6 +571,9 @@ def ppo_step_with_reference_policy(
         with torch.no_grad():
             clip_fraction = (torch.abs(ratio - 1.0) > args.clip_range).float().mean()
             total_clip_fraction += clip_fraction.item()
+            # Approximate KL divergence
+            approx_kl = ((ratio - 1) - torch.log(ratio)).mean()
+            total_approx_kl += approx_kl.item()
 
         loss = policy_loss + args.kl_penalty * kl_penalty
         loss = loss / args.train_gradient_accumulation_steps
@@ -580,7 +592,9 @@ def ppo_step_with_reference_policy(
     return {
         'loss': total_loss / len(samples),
         'policy_loss': total_policy_loss / len(samples),
-        'kl_loss': total_kl_loss / len(samples)
+        'kl_loss': total_kl_loss / len(samples),
+        'clip_fraction': total_clip_fraction / len(samples),
+        'approx_kl': total_approx_kl / len(samples)
     }
 
 
@@ -688,6 +702,9 @@ if __name__ == '__main__':
     logger.info(f"Weight updates frequency = every {args.weight_update_freq} epochs")
 
     global_step = 0
+    reward_ema = None
+    kl_ema = None
+    
     for epoch in trange(args.num_epochs):
         logger.info(f"Epoch {epoch + 1}/{args.num_epochs}")
 
@@ -701,7 +718,7 @@ if __name__ == '__main__':
         # request samples from server
         logger.info("Requesting samples from server")
         # samples = client.request_samples(epoch, args.sample_num_batches_per_epoch)
-        samples = client.get_samples(args.sample_num_batches_per_epoch)
+        samples = client.get_samples(args.sample_num_batches_per_epoch) # sample_num_batches_per_epoch = 4
 
         if not samples:
             logger.warning("No samples available, waiting")
@@ -717,32 +734,56 @@ if __name__ == '__main__':
         logger.info("Training with PPO")
         controlnet.train()
 
-        for inner_epoch in range(args.num_inner_epochs):
+        for inner_epoch in range(args.num_inner_epochs): # 4 = num_inner_epochs
             metrics = ppo_step_with_reference_policy(unet, controlnet, reference_controlnet, optimizer, accelerator, samples, args, weight_dtype, accelerator.device, feature_extractor, image_encoder, vae)
-            if metrics['kl_loss'] > 0.02:  # Threshold depends on scale
-                logger.warning(f"KL too high ({metrics['kl_loss']:.4f}), reducing learning rate")
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= 0.5
+            
+            # Update KL EMA
+            if kl_ema is None:
+                kl_ema = metrics['approx_kl']
+            else:
+                kl_ema = 0.9 * kl_ema + 0.1 * metrics['approx_kl']
+            
+            # Adaptive early stopping based on KL divergence
+            if metrics['approx_kl'] > 1.5 * args.target_kl:
+                logger.warning(f"Early stopping at inner epoch {inner_epoch} due to high KL ({metrics['approx_kl']:.4f} > {1.5 * args.target_kl:.4f})")
+                break
+            
             global_step += 1
             if inner_epoch == args.num_inner_epochs - 1 and accelerator.is_main_process:
+                # Update reward EMA
+                if reward_ema is None:
+                    reward_ema = mean_reward
+                else:
+                    reward_ema = 0.9 * reward_ema + 0.1 * mean_reward
+                
+                current_lr = optimizer.param_groups[0]['lr']
                 accelerator.log({
                     'train/loss': metrics['loss'],
                     'train/policy_loss': metrics['policy_loss'],
                     'train/kl_loss': metrics['kl_loss'],
+                    'train/approx_kl': metrics['approx_kl'],
+                    'train/kl_ema': kl_ema,
+                    'train/clip_fraction': metrics['clip_fraction'],
                     'train/mean_reward': mean_reward,
                     'train/std_reward': std_reward,
+                    'train/reward_ema': reward_ema,
+                    'train/learning_rate': current_lr,
                     'epoch': epoch
                 }, step=global_step)
             
+        # Update reference policy more frequently to prevent divergence
+        if (epoch + 1) % args.reference_update_freq == 0:
+            logger.info(f"Updating client's reference controlnet (epoch {epoch+1})")
+            controlnet_state = accelerator.unwrap_model(controlnet).state_dict()
+            reference_controlnet.load_state_dict(controlnet_state)
+            reference_controlnet.eval()
+            logger.info("Client's reference controlnet updated")
+        
+        # Update server weights less frequently
         if (epoch + 1) % args.weight_update_freq == 0 and accelerator.is_main_process:
             logger.info(f"Updating server weights (epoch {epoch+1})")
             controlnet_state = accelerator.unwrap_model(controlnet).state_dict()
             client.update_server_weights(controlnet_state)
-
-            logger.info("Updating client's reference controlnet")
-            reference_controlnet.load_state_dict(controlnet_state)
-            reference_controlnet.eval()
-            logger.info("Client's reference controlnet updated")
         
         if (epoch + 1) % args.save_freq == 0 and accelerator.is_main_process:
             save_path = os.path.join(args.output_dir, f"checkpoint-epoch-{epoch+1}")

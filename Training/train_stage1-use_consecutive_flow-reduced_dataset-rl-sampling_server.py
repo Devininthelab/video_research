@@ -6,7 +6,7 @@ import cv2
 import socket
 import struct
 import threading
-from queue import Queue
+from queue import Queue, Empty
 import numpy as np
 import shutil
 import lpips
@@ -335,7 +335,8 @@ class SamplingServer:
         self.unimatch.eval()
         self.unimatch.requires_grad_(False)
 
-        self.unimatch.to(weight_dtype)
+        # Keep Unimatch in float32 for precision
+        # self.unimatch.to(weight_dtype)
         self.vae.to(weight_dtype)
         self.image_encoder.to(weight_dtype)
         self.unet.to(weight_dtype)
@@ -354,7 +355,8 @@ class SamplingServer:
 
     def setup_dataloader(self):
         train_dataset = WebVid10M(
-            meta_path='/mnt/ssd6/thong/MOFA-Video/Training/data/clean_results_2M_train.csv',
+            meta_path='/projects_vol/gp_slab/minhthan001/data_webvid_reduce/reduced_clean_results_2M_train.csv',
+            data_dir="/projects_vol/gp_slab/minhthan001/data_webvid_reduce/reduced_WebVid",
             sample_stride=self.args.sample_stride,
             sample_n_frames=self.args.num_frames,
             sample_size=[self.args.height, self.args.width]
@@ -390,14 +392,19 @@ class SamplingServer:
             batch = next(self.dataloader_iter)
         
         weight_dtype = torch.float16
-        pixel_values = batch['pixel_values'].to(weight_dtype).to(self.device)
+        pixel_values = batch['pixel_values'].to(self.device)
 
         flows = get_optical_flows(self.unimatch, pixel_values)
+        flows = flows.to(weight_dtype).to(self.device)
+        pixel_values = pixel_values.to(weight_dtype)
+        
         cond_image = pixel_values[:, 0, :, :, :]
         pil_cond_images = [Image.fromarray((cond_image[i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)) for i in range(cond_image.shape[0])]
 
         with torch.no_grad():
-            video_outputs = self.pipeline(
+            # Use autocast for fp16 to avoid type mismatches and improve performance
+            with torch.autocast("cuda", dtype=weight_dtype):
+                video_outputs = self.pipeline(
                 pil_cond_images[0],
                 pil_cond_images[0],
                 flows,
@@ -409,7 +416,7 @@ class SamplingServer:
                 fps=7,
                 noise_aug_strength=0.02,
                 num_inference_steps=self.args.num_inference_steps,
-            )
+                )
         
         generated_frames = video_outputs.frames[0]
         gt_frames = (pixel_values[0].permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
