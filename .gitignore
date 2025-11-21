@@ -13,3 +13,6 @@ outputs/
 
 hfcp
 Training/train_utils/unimatch/pretrained/gmflow-scale2-regrefine6-mixdata-train320x576-4e7b215d.pth
+wandb
+Training/2days_rl_videos-use_consecutive_flow-reduced_dataset
+Training/logs-use_consecutive_flow-reduced_dataset-rl/

@@ -281,6 +281,10 @@ def main():
         # Extract optical flows
         print(f"\n[{idx+1}/{args.num_samples}] Processing: {video_name}")
         print("  Extracting optical flows...")
+        print(pixel_values.shape) # torch.Size([1, 25, 3, 320, 512])
+        print(pixel_values.dtype) # torch.float16
+        print(weight_dtype) # torch.float16
+        print(pixel_values.float().dtype) 
         flows = get_optical_flows(unimatch, pixel_values)  # [1, T-1, 2, H, W]
         
         # Prepare first frame
@@ -304,6 +308,7 @@ def main():
                 fps=7,
                 noise_aug_strength=0.02,
                 controlnet_cond_scale=args.controlnet_scale,
+                generator=torch.Generator(device).manual_seed(42),
             )
         
         video_frames = output.frames[0]

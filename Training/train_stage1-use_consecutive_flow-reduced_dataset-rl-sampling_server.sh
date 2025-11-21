@@ -1,5 +1,12 @@
 EXP_NAME="train_stage1"
 
+export CUDA_VISIBLE_DEVICES=0
+
 python train_stage1-use_consecutive_flow-reduced_dataset-rl-sampling_server.py \
  --pretrained_model_name_or_path="/home/minhthan001/Video/video_research/Training/ckpts/stable-video-diffusion-img2vid-xt-1-1" \
- --controlnet_model_name_or_path="/projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet" 
+ --controlnet_model_name_or_path="/projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet" \
+ --sample_batch_size=1 \
+ --num_frames=25 \
+ --width=256 \
+ --height=256 \
+ --sample_stride=4 

@@ -33,6 +33,7 @@ import diffusers
 from diffusers import AutoencoderKLTemporalDecoder, EulerDiscreteScheduler
 from diffusers.optimization import get_scheduler
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
+import wandb
 
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from models.svdxt_featureflow_forward_controlnet_s2d_fixcmp_norefine import FlowControlNet
@@ -241,6 +242,9 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="./ddpo_outputs")
     parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument("--report_to", type=str, default="wandb")
+    parser.add_argument("--wandb_project", type=str, default="ddpo-video-generation")
+    parser.add_argument("--wandb_name", type=str, default=None)
+    parser.add_argument("--log_video_freq", type=int, default=50, help="Log sample video every N epochs")
     
     # Checkpointing
     parser.add_argument("--save_freq", type=int, default=50, help="Save checkpoint every N epochs")
@@ -598,6 +602,111 @@ def ppo_step_with_reference_policy(
     }
 
 
+def generate_and_log_video(
+    pretrained_model_path,
+    unet,
+    controlnet,
+    vae,
+    image_encoder,
+    unimatch,
+    sample,
+    epoch,
+    accelerator,
+    weight_dtype,
+    args
+):
+    """Generate a video from a sample and log it to wandb"""
+    try:
+        # Create pipeline temporarily only for generation using from_pretrained
+        # This ensures all components are loaded correctly
+        pipeline = FlowControlNetPipeline.from_pretrained(
+            pretrained_model_path,
+            unet=unet,
+            controlnet=accelerator.unwrap_model(controlnet),
+            image_encoder=image_encoder,
+            vae=vae,
+            torch_dtype=weight_dtype,
+        )
+        pipeline.to(accelerator.device)
+        
+        pixel_values = sample['pixel_values'].to(accelerator.device, dtype=weight_dtype)
+        print(pixel_values.shape)
+        print(pixel_values.dtype)
+        print(weight_dtype)
+        # Get optical flows - pass fp16 to avoid OOM
+        flows = get_optical_flows(unimatch, pixel_values)
+        first_frame_tensor = pixel_values[0, 0]  # [C, H, W]
+        first_frame_pil = Image.fromarray(
+            (first_frame_tensor.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        )
+
+        # Generate video
+        with torch.no_grad():
+            with torch.autocast("cuda", dtype=torch.float16):
+                output = pipeline(
+                    first_frame_pil,
+                    first_frame_pil,
+                    flows,
+                    height=args.height,
+                    width=args.width,
+                    num_frames=args.num_frames,
+                    decode_chunk_size=8,
+                    motion_bucket_id=127,
+                    fps=7,
+                    noise_aug_strength=0.02,
+                    controlnet_cond_scale=1.0,
+                )
+
+        video_frames = output.frames[0]
+        
+        # Convert to numpy array (T, H, W, C) format
+        video_frames_np = np.stack([np.array(frame) for frame in video_frames])
+        
+        # Create logging directory if it doesn't exist
+        logging_dir = os.path.join(args.output_dir, args.logging_dir)
+        os.makedirs(logging_dir, exist_ok=True)
+        
+        # Save generated video to logging folder
+        video_save_path = os.path.join(logging_dir, f"epoch_{epoch:04d}.mp4")
+        torchvision.io.write_video(
+            video_save_path,
+            video_frames_np,
+            fps=args.fps,
+            video_codec='h264',
+            options={'crf': '10'}
+        )
+        logger.info(f"Saved video to {video_save_path}")
+        
+        # Clean up pipeline
+        del pipeline
+        torch.cuda.empty_cache()
+        
+        # Log to wandb
+        if accelerator.is_main_process:
+            # Convert to wandb format (T, C, H, W)
+            video_array_wandb = video_frames_np.transpose(0, 3, 1, 2)
+            
+            wandb.log({
+                "generated_video": wandb.Video(
+                    video_array_wandb,
+                    fps=args.fps,
+                    format="mp4"
+                ),
+                "conditioning_image": wandb.Image(first_frame_pil),
+                "epoch": epoch
+            })
+            logger.info(f"Logged generated video for epoch {epoch} to wandb")
+            logger.info(f"Video stats - shape: {video_frames_np.shape}, min: {video_frames_np.min()}, max: {video_frames_np.max()}")
+            
+    except Exception as e:
+        logger.error(f"Failed to generate/log video: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Clean up on error
+        if 'pipeline' in locals():
+            del pipeline
+            torch.cuda.empty_cache()
+
 
 if __name__ == '__main__':
     args = parse_args()
@@ -680,6 +789,7 @@ if __name__ == '__main__':
     image_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
     unimatch.to(accelerator.device, dtype=weight_dtype)
+    reference_controlnet.to(accelerator.device, dtype=weight_dtype)
 
     optimizer = torch.optim.AdamW(
         list(controlnet.parameters()),
@@ -695,7 +805,18 @@ if __name__ == '__main__':
     client.connect()
 
     if accelerator.is_main_process:
-        accelerator.init_trackers("ddpo_video_generation", config=vars(args))
+        # Initialize wandb with more detailed config
+        wandb_name = args.wandb_name or f"run-{time.strftime('%Y%m%d-%H%M%S')}"
+        accelerator.init_trackers(
+            args.wandb_project,
+            config=vars(args),
+            init_kwargs={
+                "wandb": {
+                    "name": wandb_name,
+                    "tags": ["ddpo", "video-generation", "ppo"],
+                }
+            }
+        )
     
     logger.info("***** Running DDPO training *****")
     logger.info(f"Num epochs = {args.num_epochs}")
@@ -784,6 +905,23 @@ if __name__ == '__main__':
             logger.info(f"Updating server weights (epoch {epoch+1})")
             controlnet_state = accelerator.unwrap_model(controlnet).state_dict()
             client.update_server_weights(controlnet_state)
+        
+        # OOM FUCKC FUCKC FUCK # Generate and log sample video (at epoch 0 to test, then at regular intervals) => CAUSE OOM
+        # if (epoch == 0 or (epoch + 1) % args.log_video_freq == 0) and accelerator.is_main_process and len(samples) > 0:
+        #     logger.info(f"Generating sample video for epoch {epoch+1}")
+        #     generate_and_log_video(
+        #         args.pretrained_model_name_or_path,
+        #         unet,
+        #         controlnet,
+        #         vae,
+        #         image_encoder,
+        #         unimatch,
+        #         samples[0],  # Use first sample
+        #         epoch + 1,
+        #         accelerator,
+        #         weight_dtype,
+        #         args
+        #     )
         
         if (epoch + 1) % args.save_freq == 0 and accelerator.is_main_process:
             save_path = os.path.join(args.output_dir, f"checkpoint-epoch-{epoch+1}")

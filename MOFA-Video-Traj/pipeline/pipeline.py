@@ -147,7 +147,8 @@ class FlowControlNetPipeline(DiffusionPipeline):
         num_videos_per_prompt,
         do_classifier_free_guidance,
     ):
-        image = image.to(device=device)
+        # Ensure input matches VAE dtype to avoid mixed-precision type errors
+        image = image.to(device=device, dtype=self.vae.dtype)
         image_latents = self.vae.encode(image).latent_dist.mode()
 
         if do_classifier_free_guidance:
@@ -390,7 +391,7 @@ class FlowControlNetPipeline(DiffusionPipeline):
         #prepare controlnet condition
         controlnet_condition = self.image_processor.preprocess(controlnet_condition, height=height, width=width)
         # controlnet_condition = controlnet_condition.unsqueeze(0)
-        controlnet_condition = torch.cat([controlnet_condition] * 2) if do_classifier_free_guidance else latents
+        controlnet_condition = torch.cat([controlnet_condition] * 2) if do_classifier_free_guidance else controlnet_condition
         controlnet_condition = controlnet_condition.to(device, latents.dtype)
 
         controlnet_flow = torch.cat([controlnet_flow] * 2) if do_classifier_free_guidance else latents

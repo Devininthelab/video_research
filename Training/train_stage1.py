@@ -74,6 +74,7 @@ def preprocess_size(image1, image2, padding_factor=32):
         resizes to [384, 512] for flow prediction 
         scale flow vectors back to original dimensions
     '''
+    original_dtype = image1.dtype
     transpose_img = False
     # the model is trained with size: width > height
     if image1.size(-2) > image1.size(-1):
@@ -92,9 +93,9 @@ def preprocess_size(image1, image2, padding_factor=32):
     # resize before inference
     if inference_size[0] != ori_size[0] or inference_size[1] != ori_size[1]:
         image1 = F.interpolate(image1, size=inference_size, mode='bilinear',
-                                align_corners=True)
+                                align_corners=True).to(original_dtype)
         image2 = F.interpolate(image2, size=inference_size, mode='bilinear',
-                                align_corners=True)
+                                align_corners=True).to(original_dtype)
     
     return image1, image2, inference_size, ori_size, transpose_img
 
@@ -123,7 +124,8 @@ def get_optical_flows(unimatch, video_frame):
         return: flows: [b, t-1, 2, h, w]
     '''
 
-    video_frame = video_frame * 255
+    original_dtype = video_frame.dtype
+    video_frame = (video_frame * 255).to(original_dtype)
 
     # print(video_frame.dtype)
 
