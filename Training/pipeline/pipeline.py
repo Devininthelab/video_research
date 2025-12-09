@@ -333,6 +333,7 @@ class FlowControlNetPipeline(DiffusionPipeline):
 
         # 4. Encode input image using VAE
         image = self.image_processor.preprocess(image, height=height, width=width)
+        image = image.to(device=device)
         noise = randn_tensor(image.shape, generator=generator, device=image.device, dtype=image.dtype)
         image = image + noise_aug_strength * noise
 
