@@ -15,11 +15,9 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from diffusers import AutoencoderKLTemporalDecoder
 from utils.scheduling_ddim_fix import DDIMScheduler
 from utils.scheduling_ddim_with_logprob import DDIMSchedulerWithLogProb
-from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
-from diffusers import DDPMScheduler, EulerAncestralDiscreteScheduler
 
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
-from pipeline.pipeline import FlowControlNetPipeline
+from pipeline.pipeline_with_logprob import FlowControlNetPipelineWithLogProb
 from models.svdxt_featureflow_forward_controlnet_s2d_fixcmp_norefine import FlowControlNet
 from train_utils.unimatch.unimatch.unimatch import UniMatch
 from train_utils.unimatch.utils.flow_viz import flow_to_image
@@ -274,28 +272,10 @@ def main():
                 args.pretrained_model_path,
                 subfolder="scheduler"
             )
-    elif args.scheduler == "euler_default":
-        print("Using Euler Discrete Scheduler (default) of SVD")
     else:
-        print("Using Euler Ancestral Discrete Scheduler")
-        pipeline_args["scheduler"] = EulerAncestralDiscreteScheduler.from_pretrained(
-            args.pretrained_model_path,
-            subfolder="scheduler"
-        )
-        # # Get timesteps
-        # timesteps = pipeline_args["scheduler"].timesteps
-        # alphas = pipeline_args["scheduler"].alphas_cumprod
+        print("Using Euler Discrete Scheduler")
 
-        # ddpm_scheduler = DDPMScheduler(
-        #     num_train_timesteps=pipeline_args["scheduler"].config.num_train_timesteps,
-        #     variance_type="learned_range",  # or "fixed_small", "fixed_large"
-        #     timestep_spacing="leading",
-        # )
-        # print(ddpm_scheduler)
-
-        # pipeline_args["scheduler"] = ddpm_scheduler
-
-    pipeline = FlowControlNetPipeline.from_pretrained(
+    pipeline = FlowControlNetPipelineWithLogProb.from_pretrained(
         args.pretrained_model_path,
         **pipeline_args
     )
@@ -364,6 +344,8 @@ def main():
                 controlnet_cond_scale=args.controlnet_scale,
                 generator=torch.Generator(device).manual_seed(42),
             )
+            print("Return log prob:")
+            print(output.all_log_probs)  # [num_steps, 1, 1]
         
         video_frames = output.frames[0]
         
@@ -431,12 +413,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # with checkpoint consecutive a thong
-    # python test_generation.py --controlnet_path /projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet --num_samples 1 --output_dir ./output_consecutive_a_thong
+   
 
-    # with checkpoint non consecutive a thong
-    # python test_generation.py --controlnet_path /home/thangluu7803/video/MOFA-Video/all_checkpoints_a_thong/optical_flow/checkpoint-7500/controlnet --num_samples 5 --output_dir ./output_non_consecutive_a_thong
-
-    # with author checkpoints
-    # python test_generation.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_author_checkpoints --scheduler euler_ancestral
-
+    # with log prob
+    # python test_generation_with_logprob.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_author_checkpoints --scheduler ddim --return_log_prob

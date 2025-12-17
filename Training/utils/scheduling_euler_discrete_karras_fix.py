@@ -454,7 +454,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
                 If return_dict is `True`, [`~schedulers.scheduling_euler_discrete.EulerDiscreteSchedulerOutput`] is
                 returned, otherwise a tuple is returned where the first element is the sample tensor.
         """
-
+        print("PLEASE RUN HERE")
         if (
             isinstance(timestep, int)
             or isinstance(timestep, torch.IntTensor)
@@ -515,6 +515,34 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         dt = self.sigmas[self.step_index + 1] - sigma_hat
 
         prev_sample = sample + derivative * dt
+
+        # prev_sample_mean = sample + derivative * dt
+        # print("RUN HERE FOR DEBUG")
+        # # --- PHẦN 2: THÊM STOCHASTICITY CHO PPO ---
+        
+        # # Tính toán độ lệch chuẩn (std_dev) cho exploration
+        # # Ta dùng sự chênh lệch sigma làm cơ sở, nhân với hệ số eta
+        # # Nếu eta=0 -> Quay về deterministic (nhưng log_prob sẽ inf)
+        # eta = 1.0
+        # std_dev = (sigma_hat - self.sigmas[self.step_index + 1]) * eta
+        
+        # # Đảm bảo std_dev > 0 để tính log_prob
+        # std_dev = torch.max(std_dev, torch.tensor(1e-5, device=sample.device))
+
+        # # Sample action từ phân phối Gaussian
+        # # action (x_t-1) = mean + noise * std
+        # exploration_noise = randn_tensor(prev_sample_mean.shape, device=sample.device, dtype=sample.dtype, generator=generator)
+        # prev_sample = prev_sample_mean + std_dev * exploration_noise
+        
+        # # --- PHẦN 3: TÍNH LOG PROBABILITY ---
+        # # Log pdf của Gaussian: -0.5 * ((x - mu)/sigma)^2 - log(sigma) - 0.5 * log(2pi)
+        # # Ở đây ta tính tổng log prob trên các chiều không gian (hoặc trung bình tùy loss function của bạn)
+        # log_prob = -0.5 * (exploration_noise ** 2) - torch.log(std_dev) - 0.5 * math.log(2 * math.pi)
+        
+        # # Thường ta sum log_prob lại cho mỗi sample trong batch
+        # # shape: (batch_size, channels, h, w) -> (batch_size,)
+        # log_prob = log_prob.flatten(1).sum(1)
+        # print(f"Log Probability: {log_prob}")
 
         # Cast sample back to model compatible dtype
         prev_sample = prev_sample.to(model_output.dtype)

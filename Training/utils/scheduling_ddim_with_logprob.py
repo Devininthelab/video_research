@@ -18,19 +18,19 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.schedulers.scheduling_utils import KarrasDiffusionSchedulers, SchedulerMixin
-import torch.nn.functional as F
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 @dataclass
-class DDIMSchedulerOutput(BaseOutput):
+class DDIMSchedulerWithLogProbOutput(BaseOutput):
     """
     Output class for the scheduler's `step` function output.
 
@@ -41,10 +41,13 @@ class DDIMSchedulerOutput(BaseOutput):
         pred_original_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
             The predicted denoised sample `(x_{0})` based on the model output from the current timestep.
             `pred_original_sample` can be used to preview progress or for guidance.
+        log_prob (`torch.FloatTensor`, *optional*):
+            The log probability of the sample.
     """
 
     prev_sample: torch.FloatTensor
     pred_original_sample: Optional[torch.FloatTensor] = None
+    log_prob: Optional[torch.FloatTensor] = None
 
 
 # Copied from diffusers.schedulers.scheduling_ddpm.betas_for_alpha_bar
@@ -129,46 +132,12 @@ def rescale_zero_terminal_snr(betas):
     return betas
 
 
-class DDIMScheduler(SchedulerMixin, ConfigMixin):
+class DDIMSchedulerWithLogProb(SchedulerMixin, ConfigMixin):
     """
     DDIM scheduler.
 
     This model inherits from [`SchedulerMixin`] and [`ConfigMixin`]. Check the superclass documentation for the generic
     methods the library implements for all schedulers such as loading and saving.
-
-    Args:
-        num_train_timesteps (`int`, defaults to 1000):
-            The number of diffusion steps to train the model.
-        beta_start (`float`, defaults to 0.0001):
-            The starting `beta` value of inference.
-        beta_end (`float`, defaults to 0.02):
-            The final `beta` value.
-        beta_schedule (`str`, defaults to `"linear"`):
-            The beta schedule, a mapping from a beta range to a sequence of betas for stepping the model. Choose from
-            `linear` or `scaled_linear`.
-        trained_betas (`np.ndarray`, *optional*):
-            Pass an array of betas directly to the constructor to bypass `beta_start` and `beta_end`.
-        prediction_type (`str`, defaults to `epsilon`, *optional*):
-            Prediction type of the scheduler function; can be `epsilon` (predicts the noise of the diffusion process),
-            `sample` (directly predicts the noisy sample`) or `v_prediction` (see section 2.4 of [Imagen
-            Video](https://imagen.research.google/video/paper.pdf) paper).
-        interpolation_type(`str`, defaults to `"linear"`, *optional*):
-            The interpolation type to compute intermediate sigmas for the scheduler denoising steps. Should be on of
-            `"linear"` or `"log_linear"`.
-        use_karras_sigmas (`bool`, *optional*, defaults to `False`):
-            Whether to use Karras sigmas for step sizes in the noise schedule during the sampling process. If `True`,
-            the sigmas are determined according to a sequence of noise levels {σi}.
-        timestep_spacing (`str`, defaults to `"linspace"`):
-            The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
-            Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
-        steps_offset (`int`, defaults to 0):
-            An offset added to the inference steps. You can use a combination of `offset=1` and
-            `set_alpha_to_one=False` to make the last step use step 0 for the previous alpha product like in Stable
-            Diffusion.
-        rescale_betas_zero_snr (`bool`, defaults to `False`):
-            Whether to rescale the betas to have zero terminal SNR. This enables the model to generate very bright and
-            dark samples instead of limiting it to samples with medium brightness. Loosely related to
-            [`--offset_noise`](https://github.com/huggingface/diffusers/blob/74fd735eb073eb1d774b1ab4154a0876eb82f055/examples/dreambooth/train_dreambooth.py#L506).
     """
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
@@ -419,12 +388,13 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
         model_output: torch.FloatTensor,
         timestep: Union[float, torch.FloatTensor],
         sample: torch.FloatTensor,
-        eta: float = 0.0,
+        eta: float = 1.0,
         use_clipped_model_output: bool = False,
         generator: Optional[torch.Generator] = None,
         return_dict: bool = True,
-        return_log_prob: bool = False,
-    ) -> Union[DDIMSchedulerOutput, Tuple]:
+        prev_sample: Optional[torch.FloatTensor] = None,
+        return_log_prob: bool = True,
+    ) -> Union[DDIMSchedulerWithLogProbOutput, Tuple]:
         """
         Predict the sample from the previous timestep by reversing the SDE. This function propagates the diffusion
         process from the learned model outputs (most often the predicted noise).
@@ -445,11 +415,11 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
             return_dict (`bool`):
                 Whether or not to return a [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] or
                 tuple.
-
-        Returns:
-            [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] or `tuple`:
-                If return_dict is `True`, [`~schedulers.scheduling_ddim.DDIMSchedulerOutput`] is
-                returned, otherwise a tuple is returned where the first element is the sample tensor.
+            prev_sample (`torch.FloatTensor`, *optional*):
+                An optional previous sample. If provided, the scheduler will not generate a new sample, 
+                but use the provided one to calculate the log probability.
+            return_log_prob (`bool`, defaults to `False`):
+                Whether or not to return the log probability of the previous sample.
         """
 
         if (
@@ -504,15 +474,10 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
 
         # 2. Clip "predicted" x_0
         if use_clipped_model_output:
-            # TODO: check if this is correct for v_prediction
             pred_original_sample = torch.clamp(pred_original_sample, -1, 1)
             if self.config.prediction_type == "epsilon":
                 epsilon = (z_t - alpha_prod_t ** 0.5 * pred_original_sample) / (1 - alpha_prod_t) ** 0.5
             elif self.config.prediction_type == "v_prediction":
-                epsilon = (1 - alpha_prod_t)**0.5 * z_t + alpha_prod_t**0.5 * model_output # Recompute? No, model_output is v.
-                # If we clip x_0, we should recompute epsilon consistent with clipped x_0 and z_t
-                # z_t = sqrt(alpha) x_0 + sqrt(1-alpha) epsilon
-                # epsilon = (z_t - sqrt(alpha) x_0) / sqrt(1-alpha)
                 epsilon = (z_t - alpha_prod_t**0.5 * pred_original_sample) / (1 - alpha_prod_t)**0.5
 
         # 3. Compute variance: "sigma_t(η)" -> see formula (16)
@@ -523,57 +488,51 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
         # 4. Compute "direction pointing to x_t"
         pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** 0.5 * epsilon
 
-        ##### OLD CODE #####
-        # 5. Compute x_{t-1} (this is also the prev sample mean)
-        prev_sample_z = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
+        # 5. Compute the Mean in VP Space (z_{t-1} without noise)
+        prev_sample_mean_z = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
 
-        if eta > 0:
-            noise = randn_tensor(model_output.shape, generator=generator, device=model_output.device, dtype=model_output.dtype)
-            prev_sample_z = prev_sample_z + std_dev_t * noise
-
-        # 6. Convert z_{t-1} back to x_{t-1} (EDM)
-        # x_{t-1} = z_{t-1} / sqrt(alpha_{t-1})
-        prev_sample = prev_sample_z / alpha_prod_t_prev**0.5
-        #### END OF OLD CODE
-
-        # # ----------------- MODIFIED SECTION START -----------------
-        # # 5. Compute the Mean in VP Space (z_{t-1} without noise)
-        # prev_sample_mean_z = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
-
-        # # 6. Convert Mean and StdDev to EDM (Output) Space
-        # # We do this so log_prob is calculated on the actual returned tensor values
-        # scale_factor = 1 / (alpha_prod_t_prev ** 0.5)
+        # 6. Convert Mean and StdDev to EDM (Output) Space
+        # Note: This step is crucial. The scheduler's math happens in VP space (latent scaled by sqrt(alpha)),
+        # but the output returns to EDM space (magnitude ~1). To calculate log_prob correctly for the
+        # returned sample, we must scale the Mean and StdDev to EDM space first.
         
-        # prev_sample_mean = prev_sample_mean_z * scale_factor
-        # std_dev_output = std_dev_t * scale_factor
+        # Scaling factor: 1 / sqrt(alpha_prev)
+        scale_factor = 1 / (alpha_prod_t_prev ** 0.5)
+        
+        prev_sample_mean = prev_sample_mean_z * scale_factor
+        std_dev_output = std_dev_t * scale_factor
 
-        # # Check inputs
-        # if prev_sample is not None and generator is not None:
-        #     raise ValueError("Cannot pass both generator and prev_sample.")
+        # 7. Generate Sample or Use Provided One
+        if prev_sample is not None and generator is not None:
+            raise ValueError("Cannot pass both generator and prev_sample.")
 
-        # # Generate sample if not provided
-        # if prev_sample is None:
-        #     if eta > 0:
-        #         noise = randn_tensor(model_output.shape, generator=generator, device=model_output.device, dtype=model_output.dtype)
-        #         prev_sample = prev_sample_mean + std_dev_output * noise
-        #     else:
-        #         prev_sample = prev_sample_mean
+        if prev_sample is None:
+            if eta > 0:
+                noise = randn_tensor(model_output.shape, generator=generator, device=model_output.device, dtype=model_output.dtype)
+                prev_sample = prev_sample_mean + std_dev_output * noise
+            else:
+                prev_sample = prev_sample_mean
 
-        # # Calculate Log Prob
-        # # Note: We rely on std_dev_output. If eta=0, this divides by zero. 
-        # # We assume eta > 0 when requesting log_prob, or return 0.0.
-        # if eta > 0:
-        #     log_prob = (
-        #         -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_output**2))
-        #         - torch.log(std_dev_output)
-        #         - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
-        #     )
-        #     # Mean along all but batch dimension
-        #     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
-        # else:
-        #     log_prob = torch.zeros(sample.shape[0], device=sample.device)
+        # 8. Calculate Log Probability (Optional)
+        log_prob = None
+        if return_log_prob:
+            if eta > 0:
+                # NOTE THAT THIS IS VERY IMPORTANT, SHOULD DISCUSS WITH A THONG ABT THIS
+                # Avoid division by zero and log(0)
+                std_dev_output = torch.clamp(std_dev_output, min=1e-12)
 
-        # ----------------- MODIFIED SECTION END -----------------
+                # Gaussian Log Prob on the Output (EDM) Space tensors
+                log_prob = (
+                    -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_output**2))
+                    - torch.log(std_dev_output)
+                    - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
+                )
+                # Mean along all but batch dimension
+                log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
+            else:
+                # If eta=0, variance is 0, density is infinite. 
+                # Returning 0s to avoid NaN, but gradients won't exist here.
+                log_prob = torch.zeros(sample.shape[0], device=sample.device)
 
         # Cast sample back to model compatible dtype
         prev_sample = prev_sample.to(model_output.dtype)
@@ -582,9 +541,9 @@ class DDIMScheduler(SchedulerMixin, ConfigMixin):
         self._step_index += 1
 
         if not return_dict:
-            return (prev_sample,)
+            return (prev_sample, log_prob) if return_log_prob else (prev_sample,)
 
-        return DDIMSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
+        return DDIMSchedulerWithLogProbOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample, log_prob=log_prob)
 
     def add_noise(
         self,

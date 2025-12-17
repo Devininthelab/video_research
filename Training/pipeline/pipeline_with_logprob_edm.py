@@ -456,8 +456,8 @@ class FlowControlNetPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                print("Type of scheduler", self.scheduler.__class__.__module__)
-                latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+                latents, log_prob = self.scheduler.step_ppo(noise_pred, t, latents)
+                print(f"Log Probability: {log_prob}")
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}

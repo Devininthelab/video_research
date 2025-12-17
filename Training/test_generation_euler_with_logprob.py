@@ -13,10 +13,6 @@ from tqdm import tqdm
 
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from diffusers import AutoencoderKLTemporalDecoder
-from utils.scheduling_ddim_fix import DDIMScheduler
-from utils.scheduling_ddim_with_logprob import DDIMSchedulerWithLogProb
-from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
-from diffusers import DDPMScheduler, EulerAncestralDiscreteScheduler
 
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 from pipeline.pipeline import FlowControlNetPipeline
@@ -166,19 +162,7 @@ def parse_args():
         default="/projects_vol/gp_slab/minhthan001/data_webvid_reduce/reduced_WebVid",
         help="Root directory containing the video files",
     )
-    parser.add_argument(
-        "--scheduler",
-        type=str,
-        default="euler",
-        choices=["euler", "ddim"],
-        help="Scheduler to use (euler or ddim)",
-    )
-    parser.add_argument(
-        "--return_log_prob",
-        action="store_true",
-        help="Whether to return log probabilities from DDIM scheduler",
-    )
-    
+
     return parser.parse_args()
 
 
@@ -253,52 +237,15 @@ def main():
     
     # Create pipeline
     print("Creating pipeline...")
-    pipeline_args = {
-        "unet": unet,
-        "controlnet": controlnet,
-        "image_encoder": image_encoder,
-        "vae": vae,
-        "torch_dtype": weight_dtype,
-    }
-
-    if args.scheduler == "ddim":
-        print("Using DDIM Scheduler")
-        if args.return_log_prob:
-            print("  - Returning log probabilities from DDIM Scheduler")
-            pipeline_args["scheduler"] = DDIMSchedulerWithLogProb.from_pretrained(
-                args.pretrained_model_path,
-                subfolder="scheduler"
-            )
-        else:
-            pipeline_args["scheduler"] = DDIMScheduler.from_pretrained(
-                args.pretrained_model_path,
-                subfolder="scheduler"
-            )
-    elif args.scheduler == "euler_default":
-        print("Using Euler Discrete Scheduler (default) of SVD")
-    else:
-        print("Using Euler Ancestral Discrete Scheduler")
-        pipeline_args["scheduler"] = EulerAncestralDiscreteScheduler.from_pretrained(
-            args.pretrained_model_path,
-            subfolder="scheduler"
-        )
-        # # Get timesteps
-        # timesteps = pipeline_args["scheduler"].timesteps
-        # alphas = pipeline_args["scheduler"].alphas_cumprod
-
-        # ddpm_scheduler = DDPMScheduler(
-        #     num_train_timesteps=pipeline_args["scheduler"].config.num_train_timesteps,
-        #     variance_type="learned_range",  # or "fixed_small", "fixed_large"
-        #     timestep_spacing="leading",
-        # )
-        # print(ddpm_scheduler)
-
-        # pipeline_args["scheduler"] = ddpm_scheduler
 
     pipeline = FlowControlNetPipeline.from_pretrained(
         args.pretrained_model_path,
-        **pipeline_args
-    )
+        unet=unet,
+        controlnet=controlnet,
+        image_encoder=image_encoder,
+        vae=vae,
+        torch_dtype=weight_dtype,
+        )
     pipeline = pipeline.to(device)
     pipeline.set_progress_bar_config(disable=False)
     print("✓ Pipeline created")
@@ -431,12 +378,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # with checkpoint consecutive a thong
-    # python test_generation.py --controlnet_path /projects_vol/gp_slab/minhthan001/ckpts_mofa/checkpoint-7500/controlnet --num_samples 1 --output_dir ./output_consecutive_a_thong
 
-    # with checkpoint non consecutive a thong
-    # python test_generation.py --controlnet_path /home/thangluu7803/video/MOFA-Video/all_checkpoints_a_thong/optical_flow/checkpoint-7500/controlnet --num_samples 5 --output_dir ./output_non_consecutive_a_thong
-
-    # with author checkpoints
-    # python test_generation.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_author_checkpoints --scheduler euler_ancestral
-
+    # python test_generation_euler_with_logprob.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_euler_with_logprob

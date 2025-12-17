@@ -13,7 +13,8 @@ from diffusers.models import AutoencoderKLTemporalDecoder
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
+# from utils.scheduling_euler_discrete_karras_fix import EulerDiscreteScheduler
+from utils.scheduling_ddim_with_logprob import DDIMSchedulerWithLogProb
 
 from models.unet_spatio_temporal_condition_controlnet import UNetSpatioTemporalConditionControlNetModel
 
@@ -70,7 +71,7 @@ def tensor2vid(video: torch.Tensor, processor, output_type="np"):
 
 
 @dataclass
-class FlowControlNetPipelineOutput(BaseOutput):
+class FlowControlNetPipelineOutputWithLogProb(BaseOutput):
     r"""
     Output class for zero-shot text-to-video pipeline.
 
@@ -82,9 +83,11 @@ class FlowControlNetPipelineOutput(BaseOutput):
 
     frames: Union[List[PIL.Image.Image], np.ndarray]
     controlnet_flow: torch.Tensor
+    all_latents: List[torch.Tensor]
+    all_log_probs: List[torch.Tensor]
 
 
-class FlowControlNetPipeline(DiffusionPipeline):
+class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
     model_cpu_offload_seq = "image_encoder->unet->vae"
     _callback_tensor_inputs = ["latents"]
     def __init__(
@@ -93,7 +96,7 @@ class FlowControlNetPipeline(DiffusionPipeline):
         image_encoder: CLIPVisionModelWithProjection,
         unet: UNetSpatioTemporalConditionControlNetModel,
         controlnet: FlowControlNet,
-        scheduler: EulerDiscreteScheduler,
+        scheduler: DDIMSchedulerWithLogProb,
         feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
@@ -368,8 +371,7 @@ class FlowControlNetPipeline(DiffusionPipeline):
         # 4. Prepare timesteps
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.scheduler.timesteps
-        print("Timesteps in EDM:", timesteps)
-
+        print("Timesteps:", timesteps)
         # 5. Prepare latent variables
  
         num_channels_latents = self.unet.config.in_channels
@@ -414,13 +416,14 @@ class FlowControlNetPipeline(DiffusionPipeline):
         added_time_ids = torch.cat([added_time_ids] * 2) 
         added_time_ids = added_time_ids.to(latents.device)
 
+        all_latents = [latents]
+        all_log_probs = []
         
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                print(f"Step {i+1}/{len(timesteps)}: t={t}")
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -456,8 +459,11 @@ class FlowControlNetPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                print("Type of scheduler", self.scheduler.__class__.__module__)
-                latents = self.scheduler.step(noise_pred, t, latents).prev_sample
+                latents_and_log_prob = self.scheduler.step(noise_pred, t, latents)
+                latents = latents_and_log_prob.prev_sample
+                log_prob = latents_and_log_prob.log_prob 
+                all_latents.append(latents)
+                all_log_probs.append(log_prob)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -484,7 +490,12 @@ class FlowControlNetPipeline(DiffusionPipeline):
         if not return_dict:
             return frames, controlnet_flow
 
-        return FlowControlNetPipelineOutput(frames=frames, controlnet_flow=controlnet_flow)
+        return FlowControlNetPipelineOutputWithLogProb(
+            frames=frames,
+            controlnet_flow=controlnet_flow,
+            all_latents= all_latents,
+            all_log_probs=all_log_probs,
+        )
     
 
 # resizing utils
