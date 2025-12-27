@@ -274,8 +274,8 @@ def main():
                 args.pretrained_model_path,
                 subfolder="scheduler"
             )
-    elif args.scheduler == "euler_default":
-        print("Using Euler Discrete Scheduler (default) of SVD")
+    # elif args.scheduler == "euler_default":
+    #     print("Using Euler Discrete Scheduler (default) of SVD")
     else:
         print("Using Euler Ancestral Discrete Scheduler")
         pipeline_args["scheduler"] = EulerAncestralDiscreteScheduler.from_pretrained(
@@ -440,3 +440,4 @@ if __name__ == "__main__":
     # with author checkpoints
     # python test_generation.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_author_checkpoints --scheduler euler_ancestral
 
+    # python test_generation.py --controlnet_path ./ckpts/controlnet --num_samples 5 --output_dir ./output_author_checkpoints --scheduler euler_ancestral

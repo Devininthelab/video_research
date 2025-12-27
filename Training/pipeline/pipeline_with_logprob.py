@@ -85,6 +85,13 @@ class FlowControlNetPipelineOutputWithLogProb(BaseOutput):
     controlnet_flow: torch.Tensor
     all_latents: List[torch.Tensor]
     all_log_probs: List[torch.Tensor]
+    image_latents: torch.Tensor
+    controlnet_condition: torch.Tensor
+    controlnet_flow: torch.Tensor
+    added_time_ids: torch.Tensor
+    image_embeddings: torch.Tensor
+    guidance_scale: torch.Tensor
+    
 
 
 class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
@@ -123,6 +130,16 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
 
         #image = image.unsqueeze(0)
         image = _resize_with_antialiasing(image, (224, 224))
+
+        # Normalize the image with for CLIP input
+        image = self.feature_extractor(
+            images=image,
+            do_normalize=True,
+            do_center_crop=False,
+            do_resize=False,
+            do_rescale=False,
+            return_tensors="pt",
+        ).pixel_values
 
         image = image.to(device=device, dtype=dtype)
         image_embeddings = self.image_encoder(image).image_embeds
@@ -354,6 +371,7 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
         # Repeat the image latents for each frame so we can concatenate them with the noise
         # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
+        print("Image latents shape at 374: ", image_latents.shape)
         #image_latents = torch.cat([image_latents] * 2) if do_classifier_free_guidance else image_latents
         
         # 5. Get Added Time IDs
@@ -386,7 +404,7 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
             generator,
             latents,
         )
-        
+        # print("Type of schedulers: ", type(self.scheduler))
         #prepare controlnet condition
         controlnet_condition = self.image_processor.preprocess(controlnet_condition, height=height, width=width)
         # controlnet_condition = controlnet_condition.unsqueeze(0)
@@ -419,6 +437,8 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
         all_latents = [latents]
         all_log_probs = []
         
+        controlnet_flow_first = controlnet_flow.clone()
+
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
@@ -427,7 +447,8 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
+                # print("Latent model input shape: ", latent_model_input.shape)
+                # print("Image latents shape: ", image_latents.shape)
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
                 down_block_res_samples, mid_block_res_sample, controlnet_flow, _ = self.controlnet(
@@ -441,6 +462,8 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
                     guess_mode=False,
                     return_dict=False,
                 )
+
+               
 
                 # predict the noise residual
                 noise_pred = self.unet(
@@ -456,6 +479,7 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                    #print("Guidance scale is: ", self.guidance_scale)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
@@ -490,11 +514,18 @@ class FlowControlNetPipelineWithLogProb(DiffusionPipeline):
         if not return_dict:
             return frames, controlnet_flow
 
+
+        # print("Image latents at 518: ", image_latents.shape)
         return FlowControlNetPipelineOutputWithLogProb(
             frames=frames,
-            controlnet_flow=controlnet_flow,
             all_latents= all_latents,
             all_log_probs=all_log_probs,
+            image_latents=image_latents,
+            controlnet_condition=controlnet_condition,
+            controlnet_flow=controlnet_flow,
+            added_time_ids=added_time_ids,
+            image_embeddings=image_embeddings,
+            guidance_scale=guidance_scale,
         )
     
 
@@ -590,7 +621,7 @@ def _gaussian(window_size: int, sigma):
     if window_size % 2 == 0:
         x = x + 0.5
 
-    gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
+    gauss = torch.exp(-x.float().pow(2.0) / (2 * sigma.float().pow(2.0)))
 
     return gauss / gauss.sum(-1, keepdim=True)
 

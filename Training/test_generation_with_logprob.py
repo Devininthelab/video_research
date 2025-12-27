@@ -344,9 +344,26 @@ def main():
                 controlnet_cond_scale=args.controlnet_scale,
                 generator=torch.Generator(device).manual_seed(42),
             )
-            print("Return log prob:")
+            print("Return log prob [1]:")
             print(output.all_log_probs)  # [num_steps, 1, 1]
-        
+            
+            output = pipeline(
+                first_frame_pil,
+                first_frame_pil,
+                flows,
+                height=args.height,
+                width=args.width,
+                num_frames=args.num_frames,
+                decode_chunk_size=8,
+                motion_bucket_id=127,
+                fps=7,
+                noise_aug_strength=0.02,
+                controlnet_cond_scale=args.controlnet_scale,
+                generator=torch.Generator(device).manual_seed(36),
+            )
+            print("Return log prob [2]:")
+            print(output.all_log_probs)  # [num_steps, 1, 1]
+
         video_frames = output.frames[0]
         
         # Convert to numpy
